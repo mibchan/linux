@@ -30,8 +30,8 @@
  * keep a constant PAGE_OFFSET and "fallback" to using the higher end
  * of the VMEMMAP where 52-bit support is not available in hardware.
  */
-#define VMEMMAP_SHIFT	(PAGE_SHIFT - STRUCT_PAGE_MAX_SHIFT)
-#define VMEMMAP_SIZE	((_PAGE_END(VA_BITS_MIN) - PAGE_OFFSET) >> VMEMMAP_SHIFT)
+#define VMEMMAP_SHIFT	(PAGE_SHIFT - STRUCT_PAGE_MAX_SHIFT)		// 6 = 12 - 6
+#define VMEMMAP_SIZE	((_PAGE_END(VA_BITS_MIN) - PAGE_OFFSET) >> VMEMMAP_SHIFT)	
 
 /*
  * PAGE_OFFSET - the virtual address of the start of the linear map, at the
@@ -40,18 +40,18 @@
  * KIMAGE_VADDR - the virtual address of the start of the kernel image.
  * VA_BITS - the maximum number of bits for virtual addresses.
  */
-#define VA_BITS			(CONFIG_ARM64_VA_BITS)
-#define _PAGE_OFFSET(va)	(-(UL(1) << (va)))
-#define PAGE_OFFSET		(_PAGE_OFFSET(VA_BITS))
-#define KIMAGE_VADDR		(MODULES_END)
-#define MODULES_END		(MODULES_VADDR + MODULES_VSIZE)
-#define MODULES_VADDR		(_PAGE_END(VA_BITS_MIN))
+#define VA_BITS			(CONFIG_ARM64_VA_BITS)			// 48
+#define _PAGE_OFFSET(va)	(-(UL(1) << (va)))				
+#define PAGE_OFFSET		(_PAGE_OFFSET(VA_BITS))			// FFFF 0000 0000 0000
+#define KIMAGE_VADDR		(MODULES_END)				// FFFF 8000 0800 0000
+#define MODULES_END		(MODULES_VADDR + MODULES_VSIZE)		
+#define MODULES_VADDR		(_PAGE_END(VA_BITS_MIN))		// FFFF 8000 0000 0000
 #define MODULES_VSIZE		(SZ_128M)
-#define VMEMMAP_START		(-(UL(1) << (VA_BITS - VMEMMAP_SHIFT)))
-#define VMEMMAP_END		(VMEMMAP_START + VMEMMAP_SIZE)
-#define PCI_IO_END		(VMEMMAP_START - SZ_8M)
-#define PCI_IO_START		(PCI_IO_END - PCI_IO_SIZE)
-#define FIXADDR_TOP		(VMEMMAP_START - SZ_32M)
+#define VMEMMAP_START		(-(UL(1) << (VA_BITS - VMEMMAP_SHIFT))) // FFFF FC00 0000 0000
+#define VMEMMAP_END		(VMEMMAP_START + VMEMMAP_SIZE)		// FFFF FE00 0000 0000
+#define PCI_IO_END		(VMEMMAP_START - SZ_8M)			// FFFF FBFF FF80 0000
+#define PCI_IO_START		(PCI_IO_END - PCI_IO_SIZE)		// FFFF FBFF FE80 0000
+#define FIXADDR_TOP		(VMEMMAP_START - SZ_32M)		// FFFF FBFF FD00 0000
 
 #if VA_BITS > 48
 #define VA_BITS_MIN		(48)

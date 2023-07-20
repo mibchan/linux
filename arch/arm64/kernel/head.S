@@ -87,7 +87,8 @@
 	 *  x28        create_idmap()                           callee preserved temp register
 	 */
 SYM_CODE_START(primary_entry)
-	bl	record_mmu_state
+	bl	record_mmu_state			// ver 6.3부터 추가되었다. 기존에는 preserve_boot_args에서 Cache 및 MMU On 여부에 관계없이 무조건 cache invalidation을 했지만, 
+							// 6.3부터는 Cache 및 MMU On 여부에 따라 cache invalidation을 생략하는 코드가 생겼다. 
 	bl	preserve_boot_args
 	bl	create_idmap
 
@@ -123,37 +124,57 @@ SYM_CODE_START(primary_entry)
 	b	__primary_switch
 SYM_CODE_END(primary_entry)
 
+
 	__INIT
+/*
+*	record_mmu_state ; 시스템 컨트롤 레지스터에 기록된 Cacheability에 따라 MMU 상태를 0으로 할지, 그대로 가져갈지 결정한다.
+*			   즉, virtual한 MMU 상태를 기록한다고 생각할 수 있다. (cache invalidation의 필요성 판단 시 사용)
+*	1) Cache가 꺼져있는 경우 : MMU 상태를 0으로 기록하고 return 한다.
+*	2) Cache가 켜져있는 경우 : MMU 상태를 그대로 가져간 후 return 한다. 
+*	왜 그럴까?
+*	Cache On / MMU On   : x19=0 -> cache invalidation 필요하지 않다. (MMU와 Cache 둘 다 On 이면 cache에 적절한 값이 들어가 있을 것이므로) 
+*	Cache On / MMU Off  : x19=0 -> cache invalidation 필요 (MMU를 켰을 때 Cache에 들어있는 값은 적절하지 않으므로, 주소 변환)
+*	Cache Off / MMU On  : x19=1 -> cache invalidation 필요 (Cache가 Off라면 Cache를 사용하지 않았다는 건데, 쓰레기 값이 들어가있을 수 있으므로)
+*	Cache Off / MMU Off : x19=0 -> cache invalidation 필요 (Cache가 Off라면 Cache를 사용하지 않았다는 건데, 쓰레기 값이 들어가있을 수 있으므로)
+*	즉, 원래는 Cache 사용 여부에 상관 없이 모두 invalidation을 해줘야하는 것이 맞지만(v6.3 이전까지 그래왔다) v6.3 이후부터는 MMU가 켜져있는 상태에서의 부팅 지원이다.
+*       따라서, booting protocol에 위배된 MMU On 일 때의 경우도 고려해준 것 같다.
+*/
+
 SYM_CODE_START_LOCAL(record_mmu_state)
-	mrs	x19, CurrentEL
-	cmp	x19, #CurrentEL_EL2
-	mrs	x19, sctlr_el1
-	b.ne	0f
-	mrs	x19, sctlr_el2
+	mrs	x19, CurrentEL			// x19에 현재 exception level 기록 
+	cmp	x19, #CurrentEL_EL2		// 현재 exception level이 EL2인지 비교 
+	mrs	x19, sctlr_el1			// sctlr_el1의 값을 x19에 기록 
+	b.ne	0f				// 현재 exception level이 EL1이라면 레이블 0(forward) 으로 이동 
+	mrs	x19, sctlr_el2			// 현재 exception level이 EL2라면 sctlr_el2의 값을 x19에 기록 
 0:
-CPU_LE( tbnz	x19, #SCTLR_ELx_EE_SHIFT, 1f	)
-CPU_BE( tbz	x19, #SCTLR_ELx_EE_SHIFT, 1f	)
-	tst	x19, #SCTLR_ELx_C		// Z := (C == 0)
-	and	x19, x19, #SCTLR_ELx_M		// isolate M bit
-	csel	x19, xzr, x19, eq		// clear x19 if Z
+CPU_LE( tbnz	x19, #SCTLR_ELx_EE_SHIFT, 1f	)	// config 되어있는 엔디안과 SCTLR을 통해 확인한 endian이 다르면 레이블 1로 이동
+CPU_BE( tbz	x19, #SCTLR_ELx_EE_SHIFT, 1f	)	// (빅 엔디안인 경우)
+	tst	x19, #SCTLR_ELx_C		// Z := (C == 0)	// SCTLR의 C bit:= Cacheability가 0이라면(non-cache) Z 플래그 값은 1이다.	
+	and	x19, x19, #SCTLR_ELx_M		// isolate M bit	// SCTLR의 M bit:= MMU 값을 x19에 저장한다. (0 or 1) 
+	csel	x19, xzr, x19, eq		// clear x19 if Z	// Z 플래그가 1이면 x19는 0이 되고, 0이면 x19는 유지된다. x19가 1인 경우는 Cache On / MMU On 이다.
 	ret
 
 	/*
-	 * Set the correct endianness early so all memory accesses issued
-	 * before init_kernel_el() occur in the correct byte order. Note that
-	 * this means the MMU must be disabled, or the active ID map will end
-	 * up getting interpreted with the wrong byte order.
-	 */
-1:	eor	x19, x19, #SCTLR_ELx_EE
-	bic	x19, x19, #SCTLR_ELx_M
-	b.ne	2f
-	pre_disable_mmu_workaround
-	msr	sctlr_el2, x19
-	b	3f
-2:	pre_disable_mmu_workaround
-	msr	sctlr_el1, x19
-3:	isb
-	mov	x19, xzr
+         * Set the correct endianness early so all memory accesses issued
+         * before init_kernel_el() occur in the correct byte order. Note that
+         * this means the MMU must be disabled, or the active ID map will end
+         * up getting interpreted with the wrong byte order.
+         */
+
+/*
+*	config된 엔디안과 시스템 컨트롤 레지스터에 기록된 엔디안이 다를 경우 예외 처리 루틴
+*	- endianness를 바꿀 때 MMU를 비활성화 해야만 하는 이유: MMU를 켠 상태에서 전환하면 활성 id map에 문제가 생기기 때문이다. (엔디안이 다르므로 주소 표현이 다름)
+*/
+1:	eor	x19, x19, #SCTLR_ELx_EE		// 시스템 컨트롤 레지스터의 EE bit(엔디언) 값을 toggle 한다.
+	bic	x19, x19, #SCTLR_ELx_M		// 시스템 컨트롤 레지스터의 M bit(MMU) 값을 clear 한다. (MMU Off)
+	b.ne	2f				// exception level이 EL1 이라면 레이블 2로 이동한다.
+	pre_disable_mmu_workaround		// isb 명령어가 수행된다. 퀄컴 Falkor core에 해당한다. (https://lists.cs.columbia.edu/pipermail/kvmarm/2017-November/028230.html) 
+	msr	sctlr_el2, x19			// x19의 값(엔디안을 바르게 고침)을 시스템 컨트롤 레지스터(EL2)에 넣는다.
+	b	3f				// 3번 레이블로 이동한다.
+2:	pre_disable_mmu_workaround		// EL2인 경우이다. 위와 동일하다.
+	msr	sctlr_el1, x19			// EL2인 경우이다. 위와 동일하다.
+3:	isb					// 공통적으로 수행되는 코드이다. x19를 0으로 초기화하기 전에 sctlr의 값을 갱신하는 것을 보장하도록 배리어 명령어를 사용하고 있다. 
+	mov	x19, xzr			// MMU를 off 했으므로 x19에 0을 써준다. 
 	ret
 SYM_CODE_END(record_mmu_state)
 
@@ -161,19 +182,21 @@ SYM_CODE_END(record_mmu_state)
  * Preserve the arguments passed by the bootloader in x0 .. x3
  */
 SYM_CODE_START_LOCAL(preserve_boot_args)
-	mov	x21, x0				// x21=FDT
+	mov	x21, x0				// x21=FDT					// x0에 들어있는 DTB 시작 주소를 x21에 저장한다. (DTB와 FDB의 차이?)
 
-	adr_l	x0, boot_args			// record the contents of
-	stp	x21, x1, [x0]			// x0 .. x3 at kernel entry
-	stp	x2, x3, [x0, #16]
+	adr_l	x0, boot_args			// record the contents of			// x0에 boot_args 주소를 넣는다. (u64 __cachline_aligned boot_args[4], 4개의 index를 가진 배열의 형태)
+	stp	x21, x1, [x0]			// x0 .. x3 at kernel entry			// boot_args에 x21(DTB 시작주소)와 x1(resevered 0)을 x0에 순서대로 저장한다.
+	stp	x2, x3, [x0, #16]								// 이어서 x2(reserved 0)와 x3(reserved 0)을 순서대로 저장한다.
 
-	cbnz	x19, 0f				// skip cache invalidation if MMU is on
-	dmb	sy				// needed before dc ivac with
-						// MMU off
+	cbnz	x19, 0f				// skip cache invalidation if MMU is on		// x19가 1이면 레이블 0으로, 0이면 그대로 진행 (Cache On / MMU On만 invalidation 생략)
+	dmb	sy				// needed before dc ivac with			// dc ivac : 지정한 주소의 데이터 캐시를 POC까지 invalidate 한다. (dcache_inval_poc 내부에서 해당 명령어 사용) 
+						// MMU off					// dc ivac 하기 전에 왜 MMU를 꺼야할까?
 
-	add	x1, x0, #0x20			// 4 x 8 bytes
-	b	dcache_inval_poc		// tail call
-0:	str_l   x19, mmu_enabled_at_boot, x0
+	add	x1, x0, #0x20			// 4 x 8 bytes					// x0에 0x20을 더한 값을 x1에 써준다. (boot_args에 저장된 인자들의 다음 주소)
+	b	dcache_inval_poc		// tail call					// boot_args를 메모리에 저장함으로써 조작된 cache에 대해 POC까지 Clean & Invalidate를 진행한다.
+												// --------------------------------------------------------------------------------------------------------------
+0:	str_l   x19, mmu_enabled_at_boot, x0							
+												// x19를 0으로 만든다.
 	ret
 SYM_CODE_END(preserve_boot_args)
 
