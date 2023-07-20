@@ -132,9 +132,9 @@ SYM_CODE_END(primary_entry)
 *	1) Cache가 꺼져있는 경우 : MMU 상태를 0으로 기록하고 return 한다.
 *	2) Cache가 켜져있는 경우 : MMU 상태를 그대로 가져간 후 return 한다. 
 *	왜 그럴까?
-*	Cache On / MMU On   : x19=0 -> cache invalidation 필요하지 않다. (MMU와 Cache 둘 다 On 이면 cache에 적절한 값이 들어가 있을 것이므로) 
+*	Cache On / MMU On   : x19=1 -> cache invalidation 필요하지 않다. (MMU와 Cache 둘 다 On 이면 cache에 적절한 값이 들어가 있을 것이므로) 
 *	Cache On / MMU Off  : x19=0 -> cache invalidation 필요 (MMU를 켰을 때 Cache에 들어있는 값은 적절하지 않으므로, 주소 변환)
-*	Cache Off / MMU On  : x19=1 -> cache invalidation 필요 (Cache가 Off라면 Cache를 사용하지 않았다는 건데, 쓰레기 값이 들어가있을 수 있으므로)
+*	Cache Off / MMU On  : x19=0 -> cache invalidation 필요 (Cache가 Off라면 Cache를 사용하지 않았다는 건데, 쓰레기 값이 들어가있을 수 있으므로)
 *	Cache Off / MMU Off : x19=0 -> cache invalidation 필요 (Cache가 Off라면 Cache를 사용하지 않았다는 건데, 쓰레기 값이 들어가있을 수 있으므로)
 *	즉, 원래는 Cache 사용 여부에 상관 없이 모두 invalidation을 해줘야하는 것이 맞지만(v6.3 이전까지 그래왔다) v6.3 이후부터는 MMU가 켜져있는 상태에서의 부팅 지원이다.
 *       따라서, booting protocol에 위배된 MMU On 일 때의 경우도 고려해준 것 같다.
