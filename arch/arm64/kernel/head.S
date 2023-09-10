@@ -48,6 +48,7 @@
  * The requirements are:
  *   MMU = off, D-cache = off, I-cache = on or off,
  *   x0 = physical address to the FDT blob.
+ *   이유 : ?
  *
  * Note that the callee-saved registers are used for storing variables
  * that are useful before the MMU is enabled. The allocations are described
@@ -87,8 +88,22 @@
 	 *  x28        create_idmap()                           callee preserved temp register
 	 */
 SYM_CODE_START(primary_entry)
-	bl	record_mmu_state			// ver 6.3부터 추가되었다. 기존에는 preserve_boot_args에서 Cache 및 MMU On 여부에 관계없이 무조건 cache invalidation을 했지만, 
-							// 6.3부터는 Cache 및 MMU On 여부에 따라 cache invalidation을 생략하는 코드가 생겼다. 
+	/*
+	 * MMU의 On / Off 여부를 저장하는 것이 아니라,
+	 * Cache invalidation의 필요 여부를 x19에 저장한다.
+	 * MMU on / Cache on 인 경우를 제외하고 invalidation이 필요하다. 
+	 */
+	bl	record_mmu_state			
+
+	/*
+	 * boot_args[0] = DTB 주소
+	 * boot_args[1] = 0 (reserved)
+	 * boot_args[2] = 0 (reserved)
+	 * boot_args[3] = 0 (reserved)
+	 * 위와 같이 저장한 이후, cache invalidation을 진행한다.
+	 * 단, Cache On / MMU On인 경우에는 cache invalidation을 생략하고, 
+	 *     mmu_enabled_at_boot에 1을 저장한 후 리턴한다.
+	 */
 	bl	preserve_boot_args
 	bl	create_idmap
 
@@ -98,9 +113,9 @@ SYM_CODE_START(primary_entry)
 	 * the MMU off.
 	 */
 	cbz	x19, 0f
-	adrp	x0, __idmap_text_start
-	adr_l	x1, __idmap_text_end
-	adr_l	x2, dcache_clean_poc
+	adrp	x0, __idmap_text_start		// IAMROOT 0x41be_4000
+	adr_l	x1, __idmap_text_end		// IAMROOT 0x41be_47e0
+	adr_l	x2, dcache_clean_poc		// IAMROOT 0x4023_4e04
 	blr	x2
 0:	mov	x0, x19
 	bl	init_kernel_el			// w0=cpu_boot_mode
@@ -133,15 +148,14 @@ SYM_CODE_END(primary_entry)
 *	2) Cache가 켜져있는 경우 : MMU 상태를 그대로 가져간 후 return 한다. 
 *	왜 그럴까?
 *	Cache On / MMU On   : x19=1 -> cache invalidation 필요하지 않다. (MMU와 Cache 둘 다 On 이면 cache에 적절한 값이 들어가 있을 것이므로) 
-*	Cache On / MMU Off  : x19=0 -> cache invalidation 필요 (MMU를 켰을 때 Cache에 들어있는 값은 적절하지 않으므로, 주소 변환)
+*	Cache On / MMU Off  : x19=0 -> cache invalidation 필요 (MMU를 켰을 때 Cache에 들어있는 값은 적절하지 않으므로, 주소 변환) 				????Cache 사용 X????(normal memory device memory)
 *	Cache Off / MMU On  : x19=0 -> cache invalidation 필요 (Cache가 Off라면 Cache를 사용하지 않았다는 건데, 쓰레기 값이 들어가있을 수 있으므로)
 *	Cache Off / MMU Off : x19=0 -> cache invalidation 필요 (Cache가 Off라면 Cache를 사용하지 않았다는 건데, 쓰레기 값이 들어가있을 수 있으므로)
-*	즉, 원래는 Cache 사용 여부에 상관 없이 모두 invalidation을 해줘야하는 것이 맞지만(v6.3 이전까지 그래왔다) v6.3 이후부터는 MMU가 켜져있는 상태에서의 부팅 지원이다.
-*       따라서, booting protocol에 위배된 MMU On 일 때의 경우도 고려해준 것 같다.
+*	즉, 원래는 Cache 사용 여부에 상관 없이 모두 invalidation을 해줘야하는 것이 맞지만(v6.3 이전까지 그래왔다) v6.3 이후부터는 MMU가 켜져있는 상태에서의 부팅 지원이다. 
+*	MMU가 켜진 상태에서의 부팅을 지원하는 이유는 boot time이 유의미하게 빨라질 수 있기 때문이다.
 */
-
 SYM_CODE_START_LOCAL(record_mmu_state)
-	mrs	x19, CurrentEL			// x19에 현재 exception level 기록 
+	mrs	x19, CurrentEL			 
 	cmp	x19, #CurrentEL_EL2		// 현재 exception level이 EL2인지 비교 
 	mrs	x19, sctlr_el1			// sctlr_el1의 값을 x19에 기록 
 	b.ne	0f				// 현재 exception level이 EL1이라면 레이블 0(forward) 으로 이동 
@@ -171,8 +185,8 @@ CPU_BE( tbz	x19, #SCTLR_ELx_EE_SHIFT, 1f	)	// (빅 엔디안인 경우)
 	pre_disable_mmu_workaround		// isb 명령어가 수행된다. 퀄컴 Falkor core에 해당한다. (https://lists.cs.columbia.edu/pipermail/kvmarm/2017-November/028230.html) 
 	msr	sctlr_el2, x19			// x19의 값(엔디안을 바르게 고침)을 시스템 컨트롤 레지스터(EL2)에 넣는다.
 	b	3f				// 3번 레이블로 이동한다.
-2:	pre_disable_mmu_workaround		// EL2인 경우이다. 위와 동일하다.
-	msr	sctlr_el1, x19			// EL2인 경우이다. 위와 동일하다.
+2:	pre_disable_mmu_workaround		// EL1인 경우이다. 위와 동일하다.
+	msr	sctlr_el1, x19			// EL1인 경우이다. 위와 동일하다.
 3:	isb					// 공통적으로 수행되는 코드이다. x19를 0으로 초기화하기 전에 sctlr의 값을 갱신하는 것을 보장하도록 배리어 명령어를 사용하고 있다. 
 	mov	x19, xzr			// MMU를 off 했으므로 x19에 0을 써준다. 
 	ret
@@ -181,22 +195,30 @@ SYM_CODE_END(record_mmu_state)
 /*
  * Preserve the arguments passed by the bootloader in x0 .. x3
  */
-SYM_CODE_START_LOCAL(preserve_boot_args)
-	mov	x21, x0				// x21=FDT					// x0에 들어있는 DTB 시작 주소를 x21에 저장한다. (DTB와 FDB의 차이?)
 
-	adr_l	x0, boot_args			// record the contents of			// x0에 boot_args 주소를 넣는다. (u64 __cachline_aligned boot_args[4], 4개의 index를 가진 배열의 형태)
-	stp	x21, x1, [x0]			// x0 .. x3 at kernel entry			// boot_args에 x21(DTB 시작주소)와 x1(resevered 0)을 x0에 순서대로 저장한다.
+ /* 
+ * IAMROOT20_START 2023.07.22
+ * DTB : booting 할 때 device 들을 kernel이 인식할 때(어느 device 어느 주소 memory mapping), 이 정보들을 tree 형태로 저장해놓은 구조 
+ */
+SYM_CODE_START_LOCAL(preserve_boot_args)
+	mov	x21, x0				// x21=FDT					// x0에 들어있는 DTB 시작 주소를 x21에 저장한다. (DTB와 FDT의 차이?)
+
+	adr_l	x0, boot_args			// record the contents of			// x0에 boot_args 주소를 넣는다. (u64 __cachline_aligned boot_args[4], 4개의 index를 가진 배열의 형태) global variable
+	stp	x21, x1, [x0]			// x0 .. x3 at kernel entry			// boot_args에 x21(DTB 시작주소)와 x1(resevered 0)을 x0에 순서대로 저장한다. (store pair)
 	stp	x2, x3, [x0, #16]								// 이어서 x2(reserved 0)와 x3(reserved 0)을 순서대로 저장한다.
+												// addressing mode : 
 
 	cbnz	x19, 0f				// skip cache invalidation if MMU is on		// x19가 1이면 레이블 0으로, 0이면 그대로 진행 (Cache On / MMU On만 invalidation 생략)
 	dmb	sy				// needed before dc ivac with			// dc ivac : 지정한 주소의 데이터 캐시를 POC까지 invalidate 한다. (dcache_inval_poc 내부에서 해당 명령어 사용) 
-						// MMU off					// dc ivac 하기 전에 왜 MMU를 꺼야할까?
+						// MMU off					// dc ivac 하기 전에 왜 MMU를 꺼야할까?	
+												// 이 명령어를 사용해야하는 이유? dc ivac 하기 전에 필요하다. (앞에 있는 stp 명령어가 내부 버퍼에서 완전히 마무리 되도록)
+												// CPU의 판단에 의해 명령어 순서를 reordering하는 경우 문제가 발생할 수 있다. 
+												// 어떤 case에 barrier 명령어를 수행해야 하는가? (정형화된 case 조사)
 
 	add	x1, x0, #0x20			// 4 x 8 bytes					// x0에 0x20을 더한 값을 x1에 써준다. (boot_args에 저장된 인자들의 다음 주소)
 	b	dcache_inval_poc		// tail call					// boot_args를 메모리에 저장함으로써 조작된 cache에 대해 POC까지 Clean & Invalidate를 진행한다.
 												// --------------------------------------------------------------------------------------------------------------
-0:	str_l   x19, mmu_enabled_at_boot, x0							
-												// x19를 0으로 만든다.
+0:	str_l   x19, mmu_enabled_at_boot, x0							// mmu_enabled_at_boot 심볼의 주소에 x19의 값을 넣는다. x0에는 symbol의 페이지 주소(4K 정렬)가 들어간다.
 	ret
 SYM_CODE_END(preserve_boot_args)
 
@@ -230,9 +252,11 @@ SYM_FUNC_END(clear_page_tables)
 	.macro populate_entries, tbl, rtbl, index, eindex, flags, inc, tmp1
 .Lpe\@:	phys_to_pte \tmp1, \rtbl
 	orr	\tmp1, \tmp1, \flags	// tmp1 = table entry
+	/* IAMROOT tbl[index] = rbtl */
 	str	\tmp1, [\tbl, \index, lsl #3]
 	add	\rtbl, \rtbl, \inc	// rtbl = pa next level
 	add	\index, \index, #1
+	/* if (index < eindex) branch */
 	cmp	\index, \eindex
 	b.ls	.Lpe\@
 	.endm
@@ -284,11 +308,22 @@ SYM_FUNC_END(clear_page_tables)
  */
 	.macro map_memory, tbl, rtbl, vstart, vend, flags, phys, order, istart, iend, tmp, count, sv, extra_shift
 	sub \vend, \vend, #1
+
+	/* IAMROOT rtbl은 다음 1 level 페이지 테이블을 가리킨다. 
+	 * tbl이 pgd를 가리키면 rtbl은 pud를 가리킨다.
+	 * 주석에 나와있는 것처럼 rtbl은 보통 tbl + page size 이다.
+	 */
 	add \rtbl, \tbl, #PAGE_SIZE
 	mov \count, #0
 
+	/* IAMROOT if not blank : extra shift가 지정된 경우 */	
 	.ifnb	\extra_shift
-	tst	\vend, #~((1 << (\extra_shift)) - 1)
+	tst	\vend, #~((1 << (\extra_shift)) - 1)		// IAMROOT vend가 extra_shift범위를 포함하는지 
+
+	/* IAMROOT vend가 extra_shift 커버 범위를 초과하지 않아 extra 페이지 테이블을 만들 필요가 없는 경우는 점프
+	* 지금 여기는 추가 페이지 테이블을 만들어야하는 경우이다.
+	* PAGE_SHIFT에서 3을 빼주는 이유는 entry에 저장되는 값이 8바이트 (2^3 바이트) 이기 때문이다.
+	*/
 	b.eq	.L_\@
 	compute_indices \vstart, \vend, #\extra_shift, #(PAGE_SHIFT - 3), \istart, \iend, \count
 	mov \sv, \rtbl
@@ -296,8 +331,10 @@ SYM_FUNC_END(clear_page_tables)
 	mov \tbl, \sv
 	.endif
 .L_\@:
+	/* PGD를 만든다 */
 	compute_indices \vstart, \vend, #PGDIR_SHIFT, #\order, \istart, \iend, \count
 	mov \sv, \rtbl
+	/*IAMROOT PMD table 시작 자리에 PUD 값이 저장되었다. */
 	populate_entries \tbl, \rtbl, \istart, \iend, #PMD_TYPE_TABLE, #PAGE_SIZE, \tmp
 	mov \tbl, \sv
 
@@ -316,6 +353,7 @@ SYM_FUNC_END(clear_page_tables)
 #endif
 
 	compute_indices \vstart, \vend, #SWAPPER_BLOCK_SHIFT, #(PAGE_SHIFT - 3), \istart, \iend, \count
+	/*IAMROOT phys는 pte를 가리킴. SWAPPER_BLOCK_SIZE는 pmd size */
 	bic \rtbl, \phys, #SWAPPER_BLOCK_SIZE - 1
 	populate_entries \tbl, \rtbl, \istart, \iend, \flags, #SWAPPER_BLOCK_SIZE, \tmp
 	.endm
@@ -381,7 +419,7 @@ SYM_FUNC_START_LOCAL(create_idmap)
 	 *   requires more than 47 or 48 bits, respectively.
 	 */
 #if (VA_BITS < 48)
-#define IDMAP_PGD_ORDER	(VA_BITS - PGDIR_SHIFT)
+#define IDMAP_PGD_ORDER	(VA_BITS - PGDIR_SHIFT)				// 각 페이지 디렉토리 크기가 몇 비트인지 
 #define EXTRA_SHIFT	(PGDIR_SHIFT + PAGE_SHIFT - 3)
 
 	/*
@@ -395,18 +433,42 @@ SYM_FUNC_START_LOCAL(create_idmap)
 #error "Mismatch between VA_BITS and page size/number of translation levels"
 #endif
 #else
-#define IDMAP_PGD_ORDER	(PHYS_MASK_SHIFT - PGDIR_SHIFT)
+#define IDMAP_PGD_ORDER	(PHYS_MASK_SHIFT - PGDIR_SHIFT)			// VA_BITS >= 48 인 경우에는 레벨을 올릴 필요가 없어서?
 #define EXTRA_SHIFT
 	/*
 	 * If VA_BITS == 48, we don't have to configure an additional
 	 * translation level, but the top-level table has more entries.
 	 */
 #endif
+	 * IAMROOT init_idmap_pg_dir 주
+	 * 위치는 __inittext_end 부터 
+	 * init_idmap_pg_dir의 size는 20K == page 5개 크기 
+	 */
 	adrp	x0, init_idmap_pg_dir
+	
+	/*IAMROOT 커널 코드의 시작 부분을 x3 레지스터에 대입한다.  */
 	adrp	x3, _text
-	adrp	x6, _end + MAX_FDT_SIZE + SWAPPER_BLOCK_SIZE
-	mov	x7, SWAPPER_RX_MMUFLAGS
 
+	/* IAMROOT
+	 * 최대 사이즈 2M의 FDT는 커널에서 8바이트 정렬된 주소를 사용하고 있다.
+	 * FDT는 조금 뒤에 나오는 코드에서 Read/Write로 재매핑을 해야하는데,
+	 * FDT의 끝부분이 재매핑에서 잘릴 수 있으므로 미리 SWAPPER_BLOCK_SIZE만큼 추가하여 매핑해둔다.
+	 * 정확히 끝을 포함할 수 있게끔 SWAPPER_BLOCK_SIZE를 더해준다.
+	 * _end는 커널 이미지의 끝을 의미
+	 * SWAPPER_BLOCK_SIZE는 pmd block size를 의미한다.
+	 */
+	adrp	x6, _end + MAX_FDT_SIZE + SWAPPER_BLOCK_SIZE
+
+	/* IAMROOT 매핑에 사용할 플래그 값들을 x7에 넣는다.
+	 * 읽기 전용(R) + 실행 가능(X)한 PMD 메모리 구역을 의미
+	 * 읽기 전용, 노멀 메모리 타입, 섹션 매핑, access flag 
+	 */
+	mov	x7, SWAPPER_RX_MMUFLAGS
+	
+	/* IAMROOT
+	 * 물리 주소와 가상 주소가 1:1 동일하게 준비한 후 map_memory 매크로를 통해 
+	 * 커널 이미지와 FDT 모두를 Read Only 매핑을 수행한다.
+	 */
 	map_memory x0, x1, x3, x6, x7, x3, IDMAP_PGD_ORDER, x10, x11, x12, x13, x14, EXTRA_SHIFT
 
 	/* Remap the kernel page tables r/w in the ID map */
@@ -424,7 +486,7 @@ SYM_FUNC_START_LOCAL(create_idmap)
 	bic	x2, x22, #SWAPPER_BLOCK_SIZE - 1
 	bfi	x22, x21, #0, #SWAPPER_BLOCK_SHIFT		// remapped FDT address
 	add	x3, x2, #MAX_FDT_SIZE + SWAPPER_BLOCK_SIZE
-	bic	x4, x21, #SWAPPER_BLOCK_SIZE - 1
+	bic	x4, x21, #SWAPPER_BLOCK_SIZE - 1		// bootloader에 따라서 FDT 주소가 2M align 안되어있을 수 있음.
 	mov	x5, SWAPPER_RW_MMUFLAGS
 	mov	x6, #SWAPPER_BLOCK_SHIFT
 	bl	remap_region
@@ -436,8 +498,10 @@ SYM_FUNC_START_LOCAL(create_idmap)
 	 */
 	cbnz	x19, 0f				// skip cache invalidation if MMU is on
 	dmb	sy
-
+	
+	/* IAMROOT 0x41ce_0000 */
 	adrp	x0, init_idmap_pg_dir
+	/* IAMROOT 0x41ce_5000 */
 	adrp	x1, init_idmap_pg_end
 	bl	dcache_inval_poc
 0:	ret	x28
@@ -573,14 +637,14 @@ SYM_FUNC_START(init_kernel_el)
 	b.eq	init_el2
 
 SYM_INNER_LABEL(init_el1, SYM_L_LOCAL)
-	mov_q	x0, INIT_SCTLR_EL1_MMU_OFF
+	mov_q	x0, INIT_SCTLR_EL1_MMU_OFF	// IAMROOT INIT_SCTLR_EL1_MMU_OFF == 0x3050_0800
 	pre_disable_mmu_workaround
 	msr	sctlr_el1, x0
 	isb
-	mov_q	x0, INIT_PSTATE_EL1
+	mov_q	x0, INIT_PSTATE_EL1		// IAMROOT INIT_PSTATE_EL1 == 0x3c5
 	msr	spsr_el1, x0
 	msr	elr_el1, lr
-	mov	w0, #BOOT_CPU_MODE_EL1
+	mov	w0, #BOOT_CPU_MODE_EL1		// IAMROOT BOOT_CPU_MODE_EL1 == 0xe11
 	eret
 
 SYM_INNER_LABEL(init_el2, SYM_L_LOCAL)
